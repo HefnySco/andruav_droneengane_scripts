@@ -8,7 +8,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 WorkingDirectory=/home/pi/
-ExecStart=/home/pi/scripts/wrapper/camera_manager_wrapper -c -t "/home/pi/rpicam-apps/assets/imx500_mobilenet_ssd.json"
+ExecStart=/home/pi/scripts/wrapper/camera_manager_wrapper -c -p imx500_udp -t "/home/pi/rpicam-apps/assets/imx500_mobilenet_ssd.json"
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=10

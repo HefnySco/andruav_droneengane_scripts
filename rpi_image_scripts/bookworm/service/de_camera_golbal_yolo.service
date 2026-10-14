@@ -7,7 +7,7 @@ Documentation=https://droneengage.com
 [Service]
 Type=simple
 WorkingDirectory=/home/treider/drone_engage/scripts/wrapper/
-ExecStart= /home/treider/drone_engage/scripts/wrapper/camera_manager_wrapper  -t -g  -D /home/treider/drone_engage -S /home/treider/drone_engage/scripts/
+ExecStart= /home/treider/drone_engage/scripts/wrapper/camera_manager_wrapper  -t -p onnx  -D /home/treider/drone_engage -S /home/treider/drone_engage/scripts/
 
 Restart=on-failure
 RestartSec=5s
