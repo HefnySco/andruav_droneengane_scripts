@@ -1066,14 +1066,15 @@ int main(int argc, char *argv[])
     std::string PERCEIVE_CONFIG;
     if (enable_perceive)
     {
+        // every backend runs the same de_perceive binary; -p only picks the config
+        PERCEIVE_MODULE = BASE_PERCEIVE_MODULE_PATH + "de_perceive";
         if (perceive_backend == "rknn")
         {
-            PERCEIVE_MODULE = BASE_PERCEIVE_MODULE_PATH + "de_yolo_generic_rknn";
+            // the rknn variant config keeps its historical file name
             PERCEIVE_CONFIG = BASE_PERCEIVE_MODULE_PATH + "de_yolo_ai_generic_rknn.config.module.json";
         }
         else
         {
-            PERCEIVE_MODULE = BASE_PERCEIVE_MODULE_PATH + "de_perceive";
             // optional per-backend config (e.g. de_perceive.config.module.hailo.json)
             const std::string backend_config = BASE_PERCEIVE_MODULE_PATH +
                 "de_perceive.config.module." + perceive_backend + ".json";
