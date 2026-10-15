@@ -33,6 +33,7 @@
 #define RESTART_BACKOFF_BASE_SEC 2  // first restart delay
 #define RESTART_BACKOFF_MAX_SEC 30  // backoff cap
 #define MAX_CHILD_RESTARTS 5        // stack exits after one child fails this many times
+#define RESTART_STABLE_SEC 300      // a child that survives this long is healthy: its restart budget resets
 #define SUPERVISOR_POLL_MS 250      // monitor loop tick
 
 // rpicam-vid | ffmpeg producer defaults (mirror sh_camera_run_rpi_camera.sh)
@@ -79,6 +80,7 @@ struct ManagedChild
     ChildKind kind;
     pid_t pid = -1;
     int restart_count = 0;
+    std::chrono::steady_clock::time_point started_at; // last spawn time — a long-lived child resets its restart budget
     bool pending_restart = false;
     bool finished = false; // completed (script exit 0) or permanently failed
     std::chrono::steady_clock::time_point restart_at;
@@ -442,6 +444,7 @@ pid_t spawnChild(ManagedChild &child)
 
     std::cout << child.name << " started with PID: " << pid << std::endl;
     child.pid = pid;
+    child.started_at = std::chrono::steady_clock::now();
     child.pending_restart = false;
     return pid;
 }
@@ -528,6 +531,17 @@ bool handleChildExit(pid_t exited_pid, int status)
     }
 
     std::cerr << "Child '" << child->name << "' (PID " << exited_pid << ") " << exit_reason << "." << std::endl;
+
+    // crash-loop detection: a child that stayed up past the stable window
+    // is not looping — scattered crashes must not exhaust the budget
+    const auto uptime = std::chrono::steady_clock::now() - child->started_at;
+    if (child->restart_count > 0 && uptime >= std::chrono::seconds(RESTART_STABLE_SEC))
+    {
+        std::cout << "Child '" << child->name << "' ran "
+                  << std::chrono::duration_cast<std::chrono::seconds>(uptime).count()
+                  << "s before this crash - resetting restart budget." << std::endl;
+        child->restart_count = 0;
+    }
     return scheduleRestart(*child, exit_reason);
 }
 
