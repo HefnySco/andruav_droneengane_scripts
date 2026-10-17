@@ -25,7 +25,7 @@
 #include <csignal>     // For SIGTERM, SIGINT
 #include <getopt.h>    // For parsing command-line options
 
-#define VERSION_APP "5.0.0"
+#define VERSION_APP "5.0.1"
 
 // Readiness and restart policy
 #define READINESS_TIMEOUT_SEC 30    // wait for an upstream device to get a producer
@@ -836,6 +836,17 @@ bool detectRpiCamera()
 }
 
 /**
+ * @brief Optional env override for the producer video mode (DE_VIDEO_WIDTH /
+ * DE_VIDEO_HEIGHT / DE_VIDEO_FRAMERATE). Defaults keep the 1920x1080@15
+ * production mode; low-RAM boards can drop to 640x480 without a rebuild.
+ */
+static int envIntOr(const char *env_name, const int fallback)
+{
+    const char *value = std::getenv(env_name);
+    return (value != nullptr && *value != '\0') ? std::atoi(value) : fallback;
+}
+
+/**
  * @brief Builds the rpicam-vid | ffmpeg fan-out command (TASK-03 topology):
  * one producer, one -f v4l2 output per consumer device.
  */
@@ -845,17 +856,21 @@ std::string buildCameraPipelineCommand(const std::vector<std::string> &output_de
     std::string rpicam_vid = RPICAM_VID_PATH;
     if (access(rpicam_vid.c_str(), F_OK) != 0) rpicam_vid = "rpicam-vid";
 
+    const int video_width = envIntOr("DE_VIDEO_WIDTH", VIDEO_WIDTH);
+    const int video_height = envIntOr("DE_VIDEO_HEIGHT", VIDEO_HEIGHT);
+    const int video_framerate = envIntOr("DE_VIDEO_FRAMERATE", VIDEO_FRAMERATE);
+
     std::ostringstream cmd;
     cmd << rpicam_vid << " -t 0 --nopreview --vflip=1"
-        << " --width " << VIDEO_WIDTH << " --height " << VIDEO_HEIGHT
-        << " --framerate " << VIDEO_FRAMERATE
+        << " --width " << video_width << " --height " << video_height
+        << " --framerate " << video_framerate
         << " --codec yuv420 --info-text \"\"";
     if (!postprocess_file.empty())
     {
         cmd << " --post-process-file \"" << postprocess_file << "\"";
     }
     cmd << " -o - | ffmpeg -f rawvideo -pixel_format yuv420p"
-        << " -video_size " << VIDEO_WIDTH << "x" << VIDEO_HEIGHT << " -i -";
+        << " -video_size " << video_width << "x" << video_height << " -i -";
     for (const auto &device : output_devices)
     {
         cmd << " -f v4l2 -pixel_format yuv420p " << device;
