@@ -15,6 +15,8 @@ echo -e "${RED}KILLING Camera Related APPs.${NC}"
 sudo pkill --signal 9 -f de_yolo_generic
 sudo pkill --signal 9 -f rpicam-vid
 sudo pkill --signal 9 -f de_tracker
+sudo pkill --signal 9 -f de_perceive
+sudo pkill --signal 9 -f de_yolo_generic_rknn
 sudo pkill --signal 9 -f de_yolo_generic
 sudo pkill --signal 9 -f de_camera
 sudo pkill --signal 9 -f ffmpeg

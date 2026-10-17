@@ -361,10 +361,11 @@ bool deviceHasOpener(const std::string &device_path)
 
 /**
  * @brief Readiness gate: waits until the device has at least one opener
- * (the producer attached and frames are flowing). When the device is fed
+ * (a producer process attached to it). This does NOT prove frames are
+ * flowing - only that something has the device open. When the device is fed
  * by our own producer this is called while no consumers run yet, so an
  * opener means the producer.
- * @return True when producing, false on timeout.
+ * @return True when an opener is present, false on timeout.
  */
 bool waitDeviceProducing(const std::string &device_path, int timeout_sec)
 {
@@ -1158,6 +1159,15 @@ int main(int argc, char *argv[])
     {
         config_ok = false;
     }
+    // v4l2loopback devices are single-consumer: two enabled consumers must not
+    // share one input device
+    if (enable_perceive && enable_tracker && !perceive_input_device.empty() &&
+        perceive_input_device == tracker_input_device)
+    {
+        std::cerr << "CONFIG ERROR: de_perceive and de_tracker share input device "
+                  << perceive_input_device << " - give each its own device." << std::endl;
+        config_ok = false;
+    }
     if (!config_ok)
     {
         std::cerr << "Device validation failed. Exiting." << std::endl;
@@ -1251,12 +1261,12 @@ int main(int argc, char *argv[])
                 {
                     if (!waitDeviceProducing(device, readiness_timeout_sec))
                     {
-                        std::cerr << "WARNING: camera pipeline is not producing on " << device
+                        std::cerr << "WARNING: camera pipeline has no producer attached to " << device
                                   << " after " << readiness_timeout_sec << "s." << std::endl;
                     }
                     else
                     {
-                        std::cout << "Camera pipeline producing on " << device << std::endl;
+                        std::cout << "Camera pipeline has a producer attached to " << device << std::endl;
                     }
                 }
             }
@@ -1290,7 +1300,7 @@ int main(int argc, char *argv[])
             {
                 if (!waitDeviceProducing(gimbal_device, readiness_timeout_sec))
                 {
-                    std::cerr << "WARNING: gimbal pipeline is not producing on " << gimbal_device
+                    std::cerr << "WARNING: gimbal pipeline has no producer attached to " << gimbal_device
                               << " after " << readiness_timeout_sec << "s." << std::endl;
                 }
             }
@@ -1324,7 +1334,7 @@ int main(int argc, char *argv[])
             {
                 if (!waitDeviceProducing(test_device, readiness_timeout_sec))
                 {
-                    std::cerr << "WARNING: test stream pipeline is not producing on " << test_device
+                    std::cerr << "WARNING: test stream pipeline has no producer attached to " << test_device
                               << " after " << readiness_timeout_sec << "s." << std::endl;
                 }
             }
@@ -1359,13 +1369,13 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Step 7: Start de_perceive once its input device is producing
+    // Step 7: Start de_perceive once its input device has a producer attached
     if (enable_perceive)
     {
         if (isProducerOutput(perceive_input_device) &&
             !waitDeviceProducing(perceive_input_device, readiness_timeout_sec))
         {
-            std::cerr << "WARNING: " << perceive_input_device << " not producing before de_perceive start." << std::endl;
+            std::cerr << "WARNING: " << perceive_input_device << " has no producer attached before de_perceive start." << std::endl;
         }
         ManagedChild perceive;
         perceive.name = "de_perceive";
@@ -1392,13 +1402,13 @@ int main(int argc, char *argv[])
         std::cout << "Skipping de_perceive (no --perceive-backend)." << std::endl;
     }
 
-    // Step 8: Start de_tracker (lock-on) once its input device is producing
+    // Step 8: Start de_tracker (lock-on) once its input device has a producer attached
     if (enable_tracker)
     {
         if (isProducerOutput(tracker_input_device) &&
             !waitDeviceProducing(tracker_input_device, readiness_timeout_sec))
         {
-            std::cerr << "WARNING: " << tracker_input_device << " not producing before de_tracker start." << std::endl;
+            std::cerr << "WARNING: " << tracker_input_device << " has no producer attached before de_tracker start." << std::endl;
         }
         ManagedChild tracker;
         tracker.name = "de_tracker";
@@ -1425,14 +1435,14 @@ int main(int argc, char *argv[])
         std::cout << "Skipping de_tracker (not enabled)." << std::endl;
     }
 
-    // Step 9: Start de_camera last, once the stream source is producing
+    // Step 9: Start de_camera last, once the stream source has a producer attached
     if (enable_de_camera)
     {
         if (enable_rpi_cam_capture && !camera_output_devices.empty() &&
             !waitDeviceProducing(camera_output_devices.front(), readiness_timeout_sec))
         {
             std::cerr << "WARNING: " << camera_output_devices.front()
-                      << " not producing before de_camera start." << std::endl;
+                      << " has no producer attached before de_camera start." << std::endl;
         }
         ManagedChild camera;
         camera.name = "de_camera";
