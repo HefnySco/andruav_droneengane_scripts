@@ -49,12 +49,14 @@ exit via a `trap`.
   (`DE-RPI`). Uses `--nopreview` to disable on-screen display and save
   GPU/CPU resources on headless operation. Optionally attaches a
   post-processing JSON (e.g., IMX500 MobileNet SSD).
-- `sh_camera_create_named_vc.sh` — Loads `v4l2loopback` with 7 named
+- `sh_camera_create_named_vc.sh` — Loads `v4l2loopback` with 8 named
   virtual cameras (DE-CAM1, DE-CAM2, DE-TRK, DE-RPI, DE-THERMAL, DE-AI,
-  DE-GIMBAL).
+  DE-GIMBAL, test_stream).
 - `sh_kill_all_camera_apps.sh` — Kills rpicam-vid, de_tracker,
   de_ai_tracker, de_camera, de_yolo_generic processes.
 - `sh_camera_run_gimbal_camera.sh` — Gimbal RTSP → ffmpeg → v4l2loopback.
+- `sh_camera_run_test_stream.sh` — ffmpeg `testsrc2` pattern →
+  v4l2loopback virtual camera `test_stream` (synthetic test feed).
 - `sh_camera_senxor_thermal_run_on_vc.sh` — Thermal sensor pipeline.
 
 ### Kernel Note (IMX500)
@@ -100,7 +102,11 @@ And hold the kernel package: `sudo apt-mark hold raspberrypi-kernel`.
 
 - `de_cam_control.sh {<camera_service>|restart|stop|disable}` — Wrapper
   that dispatches RPI camera actions. Enabling a mode stops and disables
-  any other camera mode first (only one can run at a time).
+  any other camera mode first (only one can run at a time). Modes:
+  `de_camera_rpi_cam.service`, `de_camera_imx_ai.service`,
+  `de_camera_tracker.service`, `de_camera_teststream.service`
+  (`camera_manager_wrapper -s` — runs only the `test_stream` ffmpeg feed
+  and `de_camera` with `de_camera.config.module.teststream.json`).
 - `enable_and_restart_rpi_cam.sh [service]` — Enables and starts one
   camera mode, disabling conflicting modes first.
 - `restart_rpi_cam.sh` — Restarts the currently active camera mode
@@ -117,6 +123,16 @@ And hold the kernel package: `sudo apt-mark hold raspberrypi-kernel`.
 - `restart_de_snd.sh` — Restarts de_snd (autostart unchanged).
 - `stop_de_snd.sh` — Stops de_snd (autostart unchanged, resume on reboot).
 - `disable_de_snd.sh` — Stops and disables de_snd.
+
+### GPIO (`de_rpi_gpio`)
+
+- `de_gpio_control.sh {enable|restart|stop|disable}` — Wrapper that
+  dispatches de_rpi_gpio actions.
+- `enable_and_restart_de_gpio.sh` — Enables and starts de_rpi_gpio.
+- `restart_de_gpio.sh` — Restarts de_rpi_gpio (autostart unchanged).
+- `stop_de_gpio.sh` — Stops de_rpi_gpio (autostart unchanged, resume on
+  reboot).
+- `disable_de_gpio.sh` — Stops and disables de_rpi_gpio.
 
 ### Telnet (`de_telnet`)
 

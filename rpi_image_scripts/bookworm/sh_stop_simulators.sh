@@ -17,7 +17,7 @@ if [ "$(id -u)" = "0" ]; then
 else
     SD_CTL=(systemctl --user)
 fi
-for unit in de-sitl-I190 de-sitl-I191 de-sim-comm-1 de-sim-comm-2 de-sim-mavlink-1 de-sim-mavlink-2; do
+for unit in de-sitl-I190 de-sitl-I191 de-sitl-I200 de-sitl-I201 de-sim-comm-1 de-sim-comm-2 de-sim-mavlink-1 de-sim-mavlink-2; do
     if "${SD_CTL[@]}" is-active "$unit" >/dev/null 2>&1; then
         "${SD_CTL[@]}" stop "$unit" >/dev/null 2>&1 && log "${GREEN}" "Stopped unit ${unit}"
     fi
@@ -30,7 +30,7 @@ if [ "$(id -u)" != "0" ]; then
 else
     SUDO_PREFIX=()
 fi
-for unit in de-sitl-I190 de-sitl-I191 de-sim-comm-1 de-sim-comm-2 de-sim-mavlink-1 de-sim-mavlink-2; do
+for unit in de-sitl-I190 de-sitl-I191 de-sitl-I200 de-sitl-I201 de-sim-comm-1 de-sim-comm-2 de-sim-mavlink-1 de-sim-mavlink-2; do
     if "${SUDO_PREFIX[@]}" systemctl is-active "$unit" >/dev/null 2>&1; then
         "${SUDO_PREFIX[@]}" systemctl stop "$unit" >/dev/null 2>&1 && log "${GREEN}" "Stopped system unit ${unit}"
     fi

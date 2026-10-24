@@ -75,8 +75,13 @@ if [ -z "$TARGET_DEVICE" ]; then
     exit 1
 fi
 
+FFMPEG_LOGLEVEL="warning"
+if [ "${DE_WRAPPER_VERBOSE:-0}" = "1" ]; then
+    FFMPEG_LOGLEVEL="info"
+fi
+
 FFMPEG_COMMAND="ffmpeg -rtsp_transport tcp -i \"${RTSP_URL}\" \
-  -f v4l2 -pix_fmt yuv420p \"${TARGET_DEVICE}\" -loglevel warning"
+  -f v4l2 -pix_fmt yuv420p \"${TARGET_DEVICE}\" -loglevel ${FFMPEG_LOGLEVEL}"
 
 RESTART_DELAY="${DE_GIMBAL_RESTART_DELAY:-0.25}"
 

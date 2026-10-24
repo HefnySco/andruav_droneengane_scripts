@@ -5,6 +5,7 @@
 #   de_camera_rpi_cam.service   -> plain camera capture (default)
 #   de_camera_imx_ai.service    -> camera + Sony IMX500 hardware AI + tracker
 #   de_camera_tracker.service   -> camera + software tracker
+#   de_camera_teststream.service -> ffmpeg testsrc2 test stream only
 #
 # Only one of these can safely run at a time (they all drive the same
 # physical camera / camera_manager_wrapper pipeline), so this script always
@@ -18,7 +19,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[1;34m'
 NC='\033[0m' # No Color
 
-ALL_CAM_SERVICES=(de_camera_rpi_cam.service de_camera_imx_ai.service de_camera_tracker.service)
+ALL_CAM_SERVICES=(de_camera_rpi_cam.service de_camera_imx_ai.service de_camera_tracker.service de_camera_teststream.service)
 
 TARGET_SERVICE="${1:-de_camera_rpi_cam.service}"
 

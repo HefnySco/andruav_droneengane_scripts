@@ -24,8 +24,9 @@
 #include <dirent.h>    // For opendir(), readdir()
 #include <csignal>     // For SIGTERM, SIGINT
 #include <getopt.h>    // For parsing command-line options
+#include <fcntl.h>     // For fcntl(), O_NONBLOCK
 
-#define VERSION_APP "5.0.1"
+#define VERSION_APP "5.1.0"
 
 // Readiness and restart policy
 #define READINESS_TIMEOUT_SEC 30    // wait for an upstream device to get a producer
@@ -61,6 +62,8 @@ std::string BASE_PERCEIVE_MODULE_PATH;
 
 volatile sig_atomic_t g_shutdown_requested = 0;
 int g_max_child_restarts = MAX_CHILD_RESTARTS; // overridable via --max-restarts
+bool g_verbose = false;                      // --verbose: raise ffmpeg loglevel + child output
+void drainChildOutputs();
 
 enum class ChildKind
 {
@@ -90,6 +93,9 @@ struct ManagedChild
     std::string module_path;
     std::string config_path;
     std::string working_dir;
+    // --verbose: read end of the child's captured stdout+stderr pipe
+    int out_fd = -1;
+    std::string out_buffer;
 };
 
 std::vector<ManagedChild> managed_children;
@@ -373,6 +379,7 @@ bool waitDeviceProducing(const std::string &device_path, int timeout_sec)
     while (std::chrono::steady_clock::now() < deadline && !g_shutdown_requested)
     {
         if (deviceHasOpener(device_path)) return true;
+        drainChildOutputs();
         std::this_thread::sleep_for(std::chrono::milliseconds(SUPERVISOR_POLL_MS));
     }
     return false;
@@ -412,15 +419,32 @@ pid_t spawnChild(ManagedChild &child)
         }
     }
 
+    // --verbose: route child stdout+stderr through a pipe so output from
+    // parallel children can be tagged per line instead of interleaving
+    int pipe_fds[2] = {-1, -1};
+    if (g_verbose && pipe(pipe_fds) != 0)
+    {
+        pipe_fds[0] = pipe_fds[1] = -1;
+    }
+
     pid_t pid = fork();
     if (pid == -1)
     {
         std::cerr << "Failed to fork for " << child.name << "." << std::endl;
+        if (pipe_fds[0] != -1) close(pipe_fds[0]);
+        if (pipe_fds[1] != -1) close(pipe_fds[1]);
         return -1;
     }
     else if (pid == 0)
     {
         setpgid(0, 0);
+        if (pipe_fds[1] != -1)
+        {
+            dup2(pipe_fds[1], STDOUT_FILENO);
+            dup2(pipe_fds[1], STDERR_FILENO);
+            close(pipe_fds[0]);
+            close(pipe_fds[1]);
+        }
         if (child.kind == ChildKind::MODULE)
         {
             if (chdir(child.working_dir.c_str()) == -1)
@@ -443,11 +467,47 @@ pid_t spawnChild(ManagedChild &child)
         }
     }
 
+    if (pipe_fds[1] != -1)
+    {
+        close(pipe_fds[1]);
+        child.out_fd = pipe_fds[0];
+        child.out_buffer.clear();
+        fcntl(child.out_fd, F_SETFL, O_NONBLOCK);
+    }
+
     std::cout << child.name << " started with PID: " << pid << std::endl;
     child.pid = pid;
     child.started_at = std::chrono::steady_clock::now();
     child.pending_restart = false;
     return pid;
+}
+
+/**
+ * @brief --verbose: drains each child's captured stdout/stderr and prints
+ * complete lines tagged with the child name so parallel children do not
+ * interleave mid-line. Partial lines stay buffered until a newline or the
+ * pipe closes.
+ */
+void drainChildOutputs()
+{
+    if (!g_verbose) return;
+    char buffer[1024];
+    for (auto &child : managed_children)
+    {
+        if (child.out_fd < 0) continue;
+        for (;;)
+        {
+            const ssize_t bytes_read = read(child.out_fd, buffer, sizeof(buffer));
+            if (bytes_read <= 0) break;
+            child.out_buffer.append(buffer, bytes_read);
+        }
+        size_t line_end;
+        while ((line_end = child.out_buffer.find('\n')) != std::string::npos)
+        {
+            std::cout << "[" << child.name << "] " << child.out_buffer.substr(0, line_end) << std::endl;
+            child.out_buffer.erase(0, line_end + 1);
+        }
+    }
 }
 
 /**
@@ -516,6 +576,17 @@ bool handleChildExit(pid_t exited_pid, int status)
     }
 
     child->pid = -1;
+    drainChildOutputs();
+    if (child->out_fd >= 0)
+    {
+        close(child->out_fd);
+        child->out_fd = -1;
+    }
+    if (!child->out_buffer.empty())
+    {
+        std::cout << "[" << child->name << "] " << child->out_buffer << std::endl;
+        child->out_buffer.clear();
+    }
 
     if (child->kind == ChildKind::SCRIPT && WIFEXITED(status) && WEXITSTATUS(status) == 0)
     {
@@ -573,6 +644,7 @@ bool waitModuleAlive(ManagedChild &child, int alive_seconds)
                 }
             }
         }
+        drainChildOutputs();
         std::this_thread::sleep_for(std::chrono::milliseconds(SUPERVISOR_POLL_MS));
     }
     return true;
@@ -617,6 +689,20 @@ void stopAllChildren()
     }
     int status;
     while (waitpid(-1, &status, WNOHANG) > 0) {}
+    drainChildOutputs();
+    for (auto &child : managed_children)
+    {
+        if (child.out_fd >= 0)
+        {
+            close(child.out_fd);
+            child.out_fd = -1;
+        }
+        if (!child.out_buffer.empty())
+        {
+            std::cout << "[" << child.name << "] " << child.out_buffer << std::endl;
+            child.out_buffer.clear();
+        }
+    }
 }
 
 /**
@@ -856,9 +942,19 @@ std::string buildCameraPipelineCommand(const std::vector<std::string> &output_de
     std::string rpicam_vid = RPICAM_VID_PATH;
     if (access(rpicam_vid.c_str(), F_OK) != 0) rpicam_vid = "rpicam-vid";
 
-    const int video_width = envIntOr("DE_VIDEO_WIDTH", VIDEO_WIDTH);
+    const int requested_width = envIntOr("DE_VIDEO_WIDTH", VIDEO_WIDTH);
     const int video_height = envIntOr("DE_VIDEO_HEIGHT", VIDEO_HEIGHT);
     const int video_framerate = envIntOr("DE_VIDEO_FRAMERATE", VIDEO_FRAMERATE);
+
+    // libcamera pads YUV rows to a 64-byte stride; an unaligned width makes
+    // the rawvideo pipe misread rows (diagonal streaking). Round up so the
+    // requested output width is already stride-aligned.
+    const int video_width = (requested_width + 63) & ~63;
+    if (video_width != requested_width)
+    {
+        std::cerr << "WARNING: video width " << requested_width
+                  << " adjusted to " << video_width << " (64-aligned YUV stride)" << std::endl;
+    }
 
     std::ostringstream cmd;
     cmd << rpicam_vid << " -t 0 --nopreview --vflip=1"
@@ -875,13 +971,14 @@ std::string buildCameraPipelineCommand(const std::vector<std::string> &output_de
     {
         cmd << " -f v4l2 -pixel_format yuv420p " << device;
     }
-    cmd << " -loglevel quiet";
+    cmd << (g_verbose ? " -loglevel info" : " -loglevel quiet");
     return cmd.str();
 }
 
 void printUsage(const char *argv0)
 {
-    std::cerr << "Usage: " << argv0 << " [--enable-rpi-cam-capture] [--enable-gimbal-capture] [--enable-test-stream] [--enable-tracker] [--perceive-backend <backend>] [--disable-de-camera] [--execute script_path] [--drone-engage-path path] [--scripts-path path] [--readiness-timeout seconds] [--module-alive seconds] [--max-restarts n] [postprocess_file_path]" << std::endl;
+    std::cerr << "Usage: " << argv0 << " [--enable-rpi-cam-capture] [--enable-gimbal-capture] [--enable-test-stream] [--enable-tracker] [--perceive-backend <backend>] [--disable-de-camera] [--execute script_path] [--drone-engage-path path] [--scripts-path path] [--readiness-timeout seconds] [--module-alive seconds] [--max-restarts n] [--verbose] [postprocess_file_path]" << std::endl;
+    std::cerr << "  -V, --verbose                     verbose child output (ffmpeg loglevel info, scripts see DE_WRAPPER_VERBOSE=1)" << std::endl;
     std::cerr << "  -p, --perceive-backend <backend>  start de_perceive; backend: onnx|rknn|hailo|imx500_udp" << std::endl;
     std::cerr << "  -t, --enable-tracker              start de_tracker (lock-on; consumes de_perceive observations)" << std::endl;
     std::cerr << "Example: " << argv0 << " --enable-rpi-cam-capture" << std::endl;
@@ -925,12 +1022,13 @@ int main(int argc, char *argv[])
         {"readiness-timeout", required_argument, 0, 'R'},
         {"module-alive", required_argument, 0, 'L'},
         {"max-restarts", required_argument, 0, 'X'},
+        {"verbose", no_argument, 0, 'V'},
         {"version", no_argument, 0, 'v'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}};
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "cmstp:de:D:S:R:L:X:vh", long_options, nullptr)) != -1)
+    while ((opt = getopt_long(argc, argv, "cmstp:de:D:S:R:L:X:vVh", long_options, nullptr)) != -1)
     {
         switch (opt)
         {
@@ -972,6 +1070,9 @@ int main(int argc, char *argv[])
         case 'v':
             std::cout << "Version: " << VERSION_APP << std::endl;
             return 0;
+        case 'V':
+            g_verbose = true;
+            break;
         case 'h':
             printUsage(argv[0]);
             return 0;
@@ -1028,6 +1129,12 @@ int main(int argc, char *argv[])
             printUsage(argv[0]);
             return 1;
         }
+    }
+
+    // verbose mode is inherited by pipeline scripts via the environment
+    if (g_verbose)
+    {
+        setenv("DE_WRAPPER_VERBOSE", "1", 1);
     }
 
     const bool enable_perceive = !perceive_backend.empty();
@@ -1530,6 +1637,7 @@ int main(int argc, char *argv[])
             return 0;
         }
 
+        drainChildOutputs();
         std::this_thread::sleep_for(std::chrono::milliseconds(SUPERVISOR_POLL_MS));
     }
 

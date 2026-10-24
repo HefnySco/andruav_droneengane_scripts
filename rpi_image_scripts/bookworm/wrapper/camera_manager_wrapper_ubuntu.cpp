@@ -25,7 +25,7 @@
 #include <csignal>     // For SIGTERM, SIGINT
 #include <getopt.h>    // For parsing command-line options
 
-#define VERSION_APP "5.0.0"
+#define VERSION_APP "5.0.1"
 
 // Readiness and restart policy
 #define READINESS_TIMEOUT_SEC 30    // wait for an upstream device to get a producer
@@ -1200,19 +1200,19 @@ int main(int argc, char *argv[])
             {
                 camera_output_devices.push_back(input_device);
             }
-            else if (input_device != primary_output)
-            {
-                // already a producer output: another consumer is reading the same device
-                std::cerr << "CONFIG ERROR: '" << consumer.first << "' input device " << input_device
-                          << " is shared with another module - v4l2loopback devices are "
-                          << "single-consumer; give each its own." << std::endl;
-                return 1;
-            }
-            else
+            else if (input_device == primary_output)
             {
                 // input is the de_camera feed itself
                 std::cerr << "WARNING: '" << consumer.first << "' reads the de_camera feed "
                           << input_device << " - if de_camera opens it too, only one wins." << std::endl;
+            }
+            else
+            {
+                // already a producer output for another consumer: two readers on one
+                // single-consumer device can never work
+                std::cerr << "CONFIG ERROR: '" << consumer.first << "' input device " << input_device
+                          << " is shared with another module - give each its own device." << std::endl;
+                return 1;
             }
         }
         // a producer output must not double as a module output device (two writers)

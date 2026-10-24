@@ -1,7 +1,7 @@
 #!/bin/bash
 
 
-/home/pi/scripts/c_helpers/updateConfig ENTER_ACCOUNT ENTER_PASSWORD cloud.ardupilot.org /home/pi/drone_engage/de_comm/de_comm.config.module.json /home/pi/simulator/sim_de_mavlink_instances/de_comm.1.config.module.json /home/pi/simulator/sim_de_mavlink_instances/de_comm.2.config.module.json
+/home/pi/scripts/c_helpers/updateConfig ENTER_USERNAME ENTER_ACCESSCODE cloud.ardupilot.org /home/pi/drone_engage/de_comm/de_comm.config.module.json /home/pi/simulator/sim_de_mavlink_instances/de_comm.1.config.module.json /home/pi/simulator/sim_de_mavlink_instances/de_comm.2.config.module.json
 
 /home/pi/scripts/wifi_start_ap.sh
 

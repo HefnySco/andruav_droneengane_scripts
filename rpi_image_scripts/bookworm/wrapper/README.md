@@ -127,7 +127,7 @@ g++ camera_manager_wrapper.cpp -o camera_manager_wrapper -pthread
 
 ## Version
 
-Current version: **5.0.0**
+Current version: **5.0.1**
 
 ---
 

@@ -4,7 +4,8 @@
 # Disables and stops all RPI camera mode services so none of them will
 # start again on the next boot until explicitly re-enabled via
 # enable_and_restart_rpi_cam.sh:
-#   de_camera_rpi_cam.service, de_camera_imx_ai.service, de_camera_tracker.service
+#   de_camera_rpi_cam.service, de_camera_imx_ai.service, de_camera_tracker.service,
+#   de_camera_teststream.service
 
 # Color definitions for terminal output
 RED='\033[0;31m'
@@ -24,7 +25,7 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-ALL_CAM_SERVICES=(de_camera_rpi_cam.service de_camera_imx_ai.service de_camera_tracker.service)
+ALL_CAM_SERVICES=(de_camera_rpi_cam.service de_camera_imx_ai.service de_camera_tracker.service de_camera_teststream.service)
 
 log_warn "Disabling and stopping all Drone Camera RPI services..."
 

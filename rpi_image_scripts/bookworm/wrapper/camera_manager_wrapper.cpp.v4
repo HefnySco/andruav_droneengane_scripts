@@ -1,0 +1,834 @@
+//***************************************************************************** */
+//  Wrapper to run Camera & Related Software with optional modules and camera pipeline
+//
+//  Auth: Mohammad S. Hefny
+//  Date: Aug 2025
+//
+//***************************************************************************** */
+
+// g++ camera_manager_wrapper.cpp -o camera_manager_wrapper -pthread
+#include <iostream>    // For standard input/output operations
+#include <string>      // For std::string
+#include <vector>      // For std::vector to handle multiple scripts
+#include <cstdlib>     // For system(), exit()
+#include <thread>      // For std::this_thread::sleep_for
+#include <chrono>      // For std::chrono::seconds
+#include <sys/types.h> // For pid_t
+#include <sys/wait.h>  // For waitpid()
+#include <unistd.h>    // For fork(), execlp(), kill(), chdir(), access()
+#include <csignal>     // For SIGTERM, SIGINT
+#include <getopt.h>    // For parsing command-line options
+
+#define VERSION_APP "4.3.0"
+
+// Module startup delays in seconds since start - not incremental
+#define GIMBAL_MODULE_DELAY_SEC 2
+#define AI_TRACKER_MODULE_DELAY_SEC 5
+#define GENERIC_AI_MODULE_DELAY_SEC 5
+#define TRACKER_MODULE_DELAY_SEC 15
+#define DE_CAMERA_MODULE_DELAY_SEC 25
+
+
+// Global PID variables to track child processes
+pid_t camera_pid = -1;
+pid_t gimbal_camera_pid = -1;
+pid_t test_stream_pid = -1;
+pid_t tracking_camera_pid = -1;
+pid_t ai_tracking_camera_pid = -1;
+pid_t generic_ai_tracking_camera_pid = -1;
+pid_t de_camera_pid = -1;
+std::vector<pid_t> script_pids; // To track PIDs of executed scripts
+
+// Default base directories for drone_engage modules
+const std::string DEFAULT_BASE_DRONE_ENGAGE_PATH = "/home/pi/drone_engage/";
+const std::string DEFAULT_SCRIPTS_PATH = "/home/pi/scripts";
+
+// Runtime base directories (can be overridden by command line arguments)
+std::string BASE_DRONE_ENGAGE_PATH = DEFAULT_BASE_DRONE_ENGAGE_PATH;
+std::string SCRIPTS_PATH = DEFAULT_SCRIPTS_PATH;
+
+// Derived module paths (computed from BASE_DRONE_ENGAGE_PATH)
+std::string BASE_CAMERA_MODULE_PATH = BASE_DRONE_ENGAGE_PATH + "de_camera/";
+std::string BASE_TRACKER_MODULE_PATH = BASE_DRONE_ENGAGE_PATH + "de_tracking/";
+std::string BASE_AI_TRACKER_MODULE_PATH = BASE_DRONE_ENGAGE_PATH + "de_ai_tracker/";
+
+// Note: Module-specific paths are now computed dynamically in main() after argument parsing
+
+/**
+ * @brief Executes a shell command and checks its exit code.
+ * @param cmd The command string to execute.
+ * @return True if the command executed successfully (exit code 0), false otherwise.
+ */
+bool executeCommand(const std::string &cmd)
+{
+    std::cout << "Executing: " << cmd << std::endl;
+    int result = std::system(cmd.c_str());
+    if (result != 0)
+    {
+        std::cerr << "Command failed with exit code " << result << ": " << cmd << std::endl;
+        return false;
+    }
+    std::cout << "Command completed successfully" << std::endl;
+    return true;
+}
+
+/**
+ * @brief Forks a new process to start a script.
+ * @param scriptPath The full path to the script to execute.
+ * @return The process ID (PID) of the child process, -1 on failure, or 0 if the script fails to start.
+ */
+pid_t startScript(const std::string &scriptPath)
+{
+    pid_t pid = fork();
+    if (pid == -1)
+    {
+        std::cerr << "Failed to fork for script: " << scriptPath << std::endl;
+        return -1;
+    }
+    else if (pid == 0)
+    {
+        std::cout << "Executing script: " << scriptPath << std::endl;
+        execlp("sh", "sh", "-c", scriptPath.c_str(), (char *)NULL);
+        perror(("execlp for script " + scriptPath + " failed").c_str());
+        return 0; // DONT EXIT IF ERROR
+    }
+
+    // Give the script a short time to start
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // Check if the child process has exited (non-blocking)
+    int status;
+    pid_t result = waitpid(pid, &status, WNOHANG);
+    if (result == -1)
+    {
+        std::cerr << "Failed to check script process status for: " << scriptPath << std::endl;
+        return -1;
+    }
+    else if (result == pid)
+    {
+        // Child process exited
+        if (WIFEXITED(status))
+        {
+            int exit_code = WEXITSTATUS(status);
+            if (exit_code != 0)
+            {
+                std::cerr << "Script " << scriptPath << " failed with exit code " << exit_code << "." << std::endl;
+                return 0; // Indicate script failed, but not a critical failure
+            }
+        }
+        else
+        {
+            std::cerr << "Script " << scriptPath << " terminated abnormally." << std::endl;
+            return -1;
+        }
+    }
+
+    // Child process is still running
+    std::cout << "Script " << scriptPath << " started with PID: " << pid << std::endl;
+    return pid;
+}
+
+/**
+ * @brief Forks a new process to start the rpicam-vid | ffmpeg pipeline.
+ * @param postProcessFile Optional path to a post-processing file.
+ * @return The process ID (PID) of the child process, -1 on failure, or 0 if no RPI camera is detected.
+ */
+pid_t startCameraPipeline(const std::string &postProcessFile)
+{
+    std::string cameraCmd = SCRIPTS_PATH + "/sh_camera_run_rpi_camera.sh ";
+    if (!postProcessFile.empty())
+    {
+        cameraCmd += " \"" + postProcessFile + "\"";
+    }
+
+    pid_t pid = fork();
+    if (pid == -1)
+    {
+        std::cerr << "Failed to fork for camera pipeline." << std::endl;
+        return -1;
+    }
+    else if (pid == 0)
+    {
+        std::cout << "Calling sh_camera_run_rpi_camera.sh with command: " << cameraCmd << std::endl;
+        execlp("sh", "sh", "-c", cameraCmd.c_str(), (char *)NULL);
+        perror("execlp for camera pipeline failed");
+        _exit(127);
+    }
+
+    // Give the script a short time to perform camera detection
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // Check if the child process has exited (non-blocking)
+    int status;
+    pid_t result = waitpid(pid, &status, WNOHANG);
+    if (result == -1)
+    {
+        std::cerr << "Failed to check camera pipeline process status." << std::endl;
+        return -1;
+    }
+    else if (result == pid)
+    {
+        // Child process exited
+        if (WIFEXITED(status))
+        {
+            int exit_code = WEXITSTATUS(status);
+            if (exit_code == 3) 
+            {
+                std::cout << "No Raspberry Pi camera detected. Skipping camera pipeline." << std::endl;
+                return 0; // Indicate no RPI camera, but not a failure
+            }
+            else if (exit_code != 0)
+            {
+                std::cerr << "Camera pipeline failed with exit code " << exit_code << "." << std::endl;
+                return -1;
+            }
+        }
+        else
+        {
+            std::cerr << "Camera pipeline terminated abnormally." << std::endl;
+            return -1;
+        }
+    }
+
+    // Child process is still running (successful pipeline start)
+    std::cout << "Camera pipeline started with PID: " << pid << std::endl;
+    return pid;
+}
+
+/**
+ * @brief Forks a new process to start the RTSP | ffmpeg pipeline for DE-GIMBAL.
+ * @return The process ID (PID) of the child process, or -1 on failure.
+ */
+pid_t startGimbalCameraPipeline()
+{
+    std::string gimbalCmd = SCRIPTS_PATH + "/sh_camera_run_gimbal_camera.sh";
+
+    pid_t pid = fork();
+    if (pid == -1)
+    {
+        std::cerr << "Failed to fork for gimbal camera pipeline." << std::endl;
+        return -1;
+    }
+    else if (pid == 0)
+    {
+        std::cout << "Calling sh_camera_run_gimbal_camera.sh with command: " << gimbalCmd << std::endl;
+        execlp("sh", "sh", "-c", gimbalCmd.c_str(), (char *)NULL);
+        perror("execlp for gimbal camera pipeline failed");
+        _exit(127);
+    }
+
+    // Give the script a short time to validate and start
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // Check if the child process has exited (non-blocking)
+    int status;
+    pid_t result = waitpid(pid, &status, WNOHANG);
+    if (result == -1)
+    {
+        std::cerr << "Failed to check gimbal camera pipeline process status." << std::endl;
+        return -1;
+    }
+    else if (result == pid)
+    {
+        // Child process exited
+        if (WIFEXITED(status))
+        {
+            int exit_code = WEXITSTATUS(status);
+            if (exit_code != 0)
+            {
+                std::cerr << "Gimbal camera pipeline failed with exit code " << exit_code << "." << std::endl;
+                return -1;
+            }
+        }
+        else
+        {
+            std::cerr << "Gimbal camera pipeline terminated abnormally." << std::endl;
+            return -1;
+        }
+    }
+
+    // Child process is still running (successful pipeline start)
+    std::cout << "Gimbal camera pipeline started with PID: " << pid << std::endl;
+    return pid;
+}
+
+/**
+ * @brief Forks a new process to start the ffmpeg testsrc2 pipeline for test_stream.
+ * @return The process ID (PID) of the child process, or -1 on failure.
+ */
+pid_t startTestStreamPipeline()
+{
+    std::string testStreamCmd = SCRIPTS_PATH + "/sh_camera_run_test_stream.sh";
+
+    pid_t pid = fork();
+    if (pid == -1)
+    {
+        std::cerr << "Failed to fork for test stream pipeline." << std::endl;
+        return -1;
+    }
+    else if (pid == 0)
+    {
+        std::cout << "Calling sh_camera_run_test_stream.sh with command: " << testStreamCmd << std::endl;
+        execlp("sh", "sh", "-c", testStreamCmd.c_str(), (char *)NULL);
+        perror("execlp for test stream pipeline failed");
+        _exit(127);
+    }
+
+    // Give the script a short time to validate and start
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // Check if the child process has exited (non-blocking)
+    int status;
+    pid_t result = waitpid(pid, &status, WNOHANG);
+    if (result == -1)
+    {
+        std::cerr << "Failed to check test stream pipeline process status." << std::endl;
+        return -1;
+    }
+    else if (result == pid)
+    {
+        // Child process exited
+        if (WIFEXITED(status))
+        {
+            int exit_code = WEXITSTATUS(status);
+            if (exit_code != 0)
+            {
+                std::cerr << "Test stream pipeline failed with exit code " << exit_code << "." << std::endl;
+                return -1;
+            }
+        }
+        else
+        {
+            std::cerr << "Test stream pipeline terminated abnormally." << std::endl;
+            return -1;
+        }
+    }
+
+    // Child process is still running (successful pipeline start)
+    std::cout << "Test stream pipeline started with PID: " << pid << std::endl;
+    return pid;
+}
+
+/**
+ * @brief Forks a new process to start a module executable.
+ * @param modulePath Path to the module executable.
+ * @param moduleConfig Path to the module's configuration file.
+ * @param moduleName Name of the module for logging.
+ * @param workingDir Directory to change to before executing.
+ * @return The process ID (PID) of the child process, or -1 on failure.
+ */
+pid_t startModule(const std::string &modulePath, const std::string &moduleConfig, const std::string &moduleName, const std::string &workingDir)
+{
+    std::cout << "Starting module: " << moduleName << std::endl;
+    std::cout << "  Module path: " << modulePath << std::endl;
+    std::cout << "  Config path: " << moduleConfig << std::endl;
+    std::cout << "  Working dir: " << workingDir << std::endl;
+    
+    // Check if module executable exists
+    if (access(modulePath.c_str(), F_OK) != 0) {
+        std::cerr << "ERROR: Module executable not found: " << modulePath << std::endl;
+        return -1;
+    }
+    
+    // Check if config file exists
+    if (access(moduleConfig.c_str(), F_OK) != 0) {
+        std::cerr << "WARNING: Config file not found: " << moduleConfig << std::endl;
+    }
+    
+    // Check if working directory exists
+    if (access(workingDir.c_str(), F_OK) != 0) {
+        std::cerr << "ERROR: Working directory not found: " << workingDir << std::endl;
+        return -1;
+    }
+    
+    pid_t pid = fork();
+    if (pid == -1)
+    {
+        std::cerr << "Failed to fork for " << moduleName << "." << std::endl;
+        return -1;
+    }
+    else if (pid == 0)
+    {
+        if (chdir(workingDir.c_str()) == -1)
+        {
+            perror(("chdir for " + moduleName + " failed").c_str());
+            _exit(1);
+        }
+        std::cout << "Executing: " << modulePath << " -c " << moduleConfig << " in dir " << workingDir << std::endl;
+        execlp(modulePath.c_str(), moduleName.c_str(), "-c", moduleConfig.c_str(), (char *)NULL);
+        perror(("execlp for " + moduleName + " failed").c_str());
+        _exit(127);
+    }
+    std::cout << moduleName << " started with PID: " << pid << std::endl;
+    return pid;
+}
+
+/**
+ * @brief Gracefully stops all child processes, including scripts.
+ */
+void stopAllChildren()
+{
+    if (camera_pid > 0)
+    {
+        std::cout << "Stopping camera pipeline (PID " << camera_pid << ")..." << std::endl;
+        kill(camera_pid, SIGTERM);
+    }
+    if (gimbal_camera_pid > 0)
+    {
+        std::cout << "Stopping gimbal camera pipeline (PID " << gimbal_camera_pid << ")..." << std::endl;
+        kill(gimbal_camera_pid, SIGTERM);
+    }
+    if (test_stream_pid > 0)
+    {
+        std::cout << "Stopping test stream pipeline (PID " << test_stream_pid << ")..." << std::endl;
+        kill(test_stream_pid, SIGTERM);
+    }
+    if (tracking_camera_pid > 0)
+    {
+        std::cout << "Stopping tracking module (PID " << tracking_camera_pid << ")..." << std::endl;
+        kill(tracking_camera_pid, SIGTERM);
+    }
+    if (ai_tracking_camera_pid > 0)
+    {
+        std::cout << "Stopping ai tracking module (PID " << ai_tracking_camera_pid << ")..." << std::endl;
+        kill(ai_tracking_camera_pid, SIGTERM);
+    }
+    if (generic_ai_tracking_camera_pid > 0)
+    {
+        std::cout << "Stopping generic ai tracking module (PID " << generic_ai_tracking_camera_pid << ")..." << std::endl;
+        kill(generic_ai_tracking_camera_pid, SIGTERM);
+    }
+    if (de_camera_pid > 0)
+    {
+        std::cout << "Stopping de_camera module (PID " << de_camera_pid << ")..." << std::endl;
+        kill(de_camera_pid, SIGTERM);
+    }
+    for (pid_t script_pid : script_pids)
+    {
+        if (script_pid > 0)
+        {
+            std::cout << "Stopping script (PID " << script_pid << ")..." << std::endl;
+            kill(script_pid, SIGTERM);
+        }
+    }
+}
+
+/**
+ * @brief Pre-emptively kills any running instances of child processes.
+ */
+void preemptiveKill()
+{
+    std::cout << "Pre-emptively killing any old 'rpicam-vid', 'de_tracker', 'de_camera', and 'de_yolo_generic' processes..." << std::endl;
+    std::string kill_script = SCRIPTS_PATH;
+    if (kill_script.back() == '/') kill_script.pop_back();  // Remove trailing slash
+    executeCommand("sudo " + kill_script + "/sh_kill_all_camera_apps.sh");
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+}
+
+/**
+ * @brief Signal handler for termination signals (SIGINT, SIGTERM).
+ */
+void signal_handler(int signal_num)
+{
+    std::cout << "Received signal " << signal_num << ". Shutting down." << std::endl;
+    preemptiveKill();
+    exit(0);
+}
+
+int main(int argc, char *argv[])
+{
+    // Command-line options
+    bool enable_rpi_cam_capture = false;
+    bool enable_gimbal_capture = false;
+    bool enable_test_stream = false;
+    bool enable_tracker = false;
+    bool enable_ai_tracker = false;
+    bool enable_generic_ai_tracker = false;
+    bool enable_de_camera = true; // Enabled by default
+    std::string postProcessFilePath;
+    std::vector<std::string> scripts_to_execute; // To store script paths
+    
+    // Module startup delays in seconds (with defaults)
+    int ai_tracker_delay_sec = AI_TRACKER_MODULE_DELAY_SEC;
+    int generic_ai_delay_sec = GENERIC_AI_MODULE_DELAY_SEC;
+    int tracker_delay_sec = TRACKER_MODULE_DELAY_SEC;
+    int de_camera_delay_sec = DE_CAMERA_MODULE_DELAY_SEC;
+    int gimbal_delay_sec = 0; // Default: no delay for gimbal
+
+    std::cout << "Camera Wrapper ver: " << VERSION_APP << std::endl;
+
+    // Parse command-line options
+    static struct option long_options[] = {
+        {"enable-rpi-cam-capture", no_argument, 0, 'c'},
+        {"enable-gimbal-capture", no_argument, 0, 'm'},
+        {"enable-test-stream", no_argument, 0, 's'},
+        {"enable-tracker", no_argument, 0, 't'},
+        {"enable-ai-tracker", no_argument, 0, 'a'},
+        {"enable-generic-ai-tracker", no_argument, 0, 'g'},
+        {"disable-de-camera", no_argument, 0, 'd'},
+        {"execute", required_argument, 0, 'e'},
+        {"drone-engage-path", required_argument, 0, 'D'},
+        {"scripts-path", required_argument, 0, 'S'},
+        {"ai-tracker-delay", required_argument, 0, 'A'},
+        {"generic-ai-delay", required_argument, 0, 'G'},
+        {"tracker-delay", required_argument, 0, 'T'},
+        {"de-camera-delay", required_argument, 0, 'C'},
+        {"gimbal-delay", required_argument, 0, 'M'},
+        {"version", no_argument, 0, 'v'},
+        {0, 0, 0, 0}};
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, "cmtasde:D:S:gvA:G:T:C:M:", long_options, nullptr)) != -1)
+    {
+        switch (opt)
+        {
+        case 'c':
+            enable_rpi_cam_capture = true;
+            break;
+        case 'm':
+            enable_gimbal_capture = true;
+            break;
+        case 's':
+            enable_test_stream = true;
+            break;
+        case 't':
+            enable_tracker = true;
+            break;
+        case 'a':
+            enable_ai_tracker = true;
+            break;
+        case 'g':
+            enable_generic_ai_tracker = true;
+            break;
+        case 'd':
+            enable_de_camera = false;
+            break;
+        case 'e':
+            if (optarg && optarg[0] != '\0') // Check for non-null and non-empty
+                scripts_to_execute.push_back(optarg);
+            else
+            {
+                std::cerr << "Error: No valid script path provided for --execute option." << std::endl;
+                return 1;
+            }
+            break;
+        case 'v':
+            std::cout << "Version: " << VERSION_APP << std::endl;
+            return 0;
+        case 'D':
+            if (optarg && optarg[0] != '\0')
+            {
+                BASE_DRONE_ENGAGE_PATH = optarg;
+                // Ensure path ends with exactly one /
+                if (BASE_DRONE_ENGAGE_PATH.back() != '/')
+                    BASE_DRONE_ENGAGE_PATH += "/";
+            }
+            else
+            {
+                std::cerr << "Error: No valid drone engage path provided for --drone-engage-path option." << std::endl;
+                return 1;
+            }
+            break;
+        case 'S':
+            if (optarg && optarg[0] != '\0')
+            {
+                SCRIPTS_PATH = optarg;
+                // Ensure path ends with exactly one /
+                if (SCRIPTS_PATH.back() != '/')
+                    SCRIPTS_PATH += "/";
+            }
+            else
+            {
+                std::cerr << "Error: No valid scripts path provided for --scripts-path option." << std::endl;
+                return 1;
+            }
+            break;
+        case 'A':
+            if (optarg && optarg[0] != '\0')
+            {
+                ai_tracker_delay_sec = std::atoi(optarg);
+                if (ai_tracker_delay_sec < 0) ai_tracker_delay_sec = AI_TRACKER_MODULE_DELAY_SEC;
+            }
+            break;
+        case 'G':
+            if (optarg && optarg[0] != '\0')
+            {
+                generic_ai_delay_sec = std::atoi(optarg);
+                if (generic_ai_delay_sec < 0) generic_ai_delay_sec = GENERIC_AI_MODULE_DELAY_SEC;
+            }
+            break;
+        case 'T':
+            if (optarg && optarg[0] != '\0')
+            {
+                tracker_delay_sec = std::atoi(optarg);
+                if (tracker_delay_sec < 0) tracker_delay_sec = TRACKER_MODULE_DELAY_SEC;
+            }
+            break;
+        case 'C':
+            if (optarg && optarg[0] != '\0')
+            {
+                de_camera_delay_sec = std::atoi(optarg);
+                if (de_camera_delay_sec < 0) de_camera_delay_sec = DE_CAMERA_MODULE_DELAY_SEC;
+            }
+            break;
+        case 'M':
+            if (optarg && optarg[0] != '\0')
+            {
+                gimbal_delay_sec = std::atoi(optarg);
+                if (gimbal_delay_sec < 0) gimbal_delay_sec = 0;
+            }
+            break;
+        default:
+            std::cerr << "Usage: " << argv[0] << " [--enable-rpi-cam-capture] [--enable-gimbal-capture] [--enable-test-stream] [--enable-tracker] [--enable-ai-tracker] [--enable-generic-ai-tracker] [--disable-de-camera] [--execute script_path] [--drone-engage-path path] [--scripts-path path] [--ai-tracker-delay seconds] [--generic-ai-delay seconds] [--tracker-delay seconds] [--de-camera-delay seconds] [--gimbal-delay seconds] [postprocess_file_path]" << std::endl;
+            std::cerr << "Example: " << argv[0] << " --enable-rpi-cam-capture --enable-tracker" << std::endl;
+            std::cerr << "Example: " << argv[0] << " --enable-gimbal-capture" << std::endl;
+            std::cerr << "Example: " << argv[0] << " --enable-test-stream" << std::endl;
+            std::cerr << "Example: " << argv[0] << " --enable-ai-tracker \"/usr/share/rpi-camera-assets/imx500_mobilenet_ssd.json\"" << std::endl;
+            std::cerr << "Example: " << argv[0] << " --enable-generic-ai-tracker" << std::endl;
+            std::cerr << "Example: " << argv[0] << " --enable-rpi-cam-capture --execute /path/to/script.sh" << std::endl;
+            std::cerr << "Example: " << argv[0] << " --drone-engage-path /custom/path/drone_engage --enable-rpi-cam-capture" << std::endl;
+            std::cerr << "Example: " << argv[0] << " --scripts-path /custom/scripts --enable-rpi-cam-capture" << std::endl;
+            std::cerr << "Example: " << argv[0] << " --enable-generic-ai-tracker --generic-ai-delay 10" << std::endl;
+            std::cerr << "Example: " << argv[0] << " --enable-tracker --tracker-delay 20 --de-camera-delay 30" << std::endl;
+            std::cerr << "Example: " << argv[0] << " --enable-gimbal-capture --gimbal-delay 5" << std::endl;
+            return 1;
+        }
+    }
+
+    // Parse optional postprocess_file_path
+    if (optind < argc && argv[optind] != nullptr && argv[optind][0] != '\0')
+    {
+        postProcessFilePath = argv[optind];
+    }
+
+    // Update derived module paths based on final base path (after parsing arguments)
+    BASE_CAMERA_MODULE_PATH = BASE_DRONE_ENGAGE_PATH + "de_camera/";
+    BASE_TRACKER_MODULE_PATH = BASE_DRONE_ENGAGE_PATH + "de_tracking/";
+    BASE_AI_TRACKER_MODULE_PATH = BASE_DRONE_ENGAGE_PATH + "de_ai_tracker/";
+    std::string BASE_GENERIC_AI_MODULE_PATH = BASE_DRONE_ENGAGE_PATH + "de_yolo_generic/";
+
+    // Update module paths based on final base paths (after parsing arguments)
+    const std::string DE_CAMERA_MODULE = BASE_CAMERA_MODULE_PATH + "de_camera";
+    const std::string DE_CAMERA_CONFIG = BASE_CAMERA_MODULE_PATH +
+        (enable_test_stream ? "de_camera.config.module.teststream.json" : "de_camera.config.module.json");
+    const std::string TRACKING_MODULE = BASE_TRACKER_MODULE_PATH + "de_tracker";
+    const std::string TRACKING_CONFIG = BASE_TRACKER_MODULE_PATH + "de_tracker.config.module.json";
+    const std::string AI_TRACKER_MODULE = BASE_AI_TRACKER_MODULE_PATH + "de_ai_tracker.so";
+    const std::string AI_TRACKER_CONFIG = BASE_AI_TRACKER_MODULE_PATH + "de_ai_tracker.config.module.json";
+    const std::string GENERIC_AI_MODULE = BASE_GENERIC_AI_MODULE_PATH + "de_yolo_generic";
+    const std::string GENERIC_AI_CONFIG = BASE_GENERIC_AI_MODULE_PATH + "de_yolo_ai_generic.config.module.json";
+
+    // Display current paths and delays for debugging
+    std::cout << "Using paths:" << std::endl;
+    std::cout << "  DroneEngage: " << BASE_DRONE_ENGAGE_PATH << std::endl;
+    std::cout << "  Camera: " << BASE_CAMERA_MODULE_PATH << std::endl;
+    std::cout << "  Tracker: " << BASE_TRACKER_MODULE_PATH << std::endl;
+    std::cout << "  AI Tracker: " << BASE_AI_TRACKER_MODULE_PATH << std::endl;
+    std::cout << "  Generic AI: " << BASE_GENERIC_AI_MODULE_PATH << std::endl;
+    std::cout << "  Scripts: " << SCRIPTS_PATH << std::endl;
+    std::cout << "Module delays:" << std::endl;
+    std::cout << "  AI Tracker: " << ai_tracker_delay_sec << "s" << std::endl;
+    std::cout << "  Generic AI: " << generic_ai_delay_sec << "s" << std::endl;
+    std::cout << "  Tracker: " << tracker_delay_sec << "s" << std::endl;
+    std::cout << "  DE Camera: " << de_camera_delay_sec << "s" << std::endl;
+    std::cout << "  Gimbal: " << gimbal_delay_sec << "s" << std::endl;
+
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+
+    // Step 1: Pre-emptive kill of old processes
+    preemptiveKill();
+
+    // Step 2: Always load v4l2loopback module
+    std::string create_vc_script = SCRIPTS_PATH;
+    if (create_vc_script.back() == '/') create_vc_script.pop_back();  // Remove trailing slash
+    if (!executeCommand(create_vc_script + "/sh_camera_create_named_vc.sh"))
+    {
+        std::cerr << "Failed to load v4l2loopback module. Exiting." << std::endl;
+        return 1;
+    }
+    executeCommand("ls /sys/devices/virtual/video4linux/");
+
+    // Step 3: Start rpicam-vid | ffmpeg if enabled
+    if (enable_rpi_cam_capture)
+    {
+        std::cout << "Starting camera pipeline..." << std::endl;
+        camera_pid = startCameraPipeline(postProcessFilePath);
+        if (camera_pid == -1)
+        {
+            std::cerr << "CRITICAL: Failed to start camera pipeline. Exiting." << std::endl;
+            stopAllChildren();
+            return 1;
+        }
+        else if (camera_pid == 0)
+        {
+            std::cout << "No Raspberry Pi camera detected, but continuing with other modules if enabled." << std::endl;
+            camera_pid = -1; // Reset camera_pid to avoid stopping a non-existent process
+        }
+    }
+    else
+    {
+        std::cout << "Skipping camera pipeline (not enabled)." << std::endl;
+    }
+
+    // Step 3b: Start gimbal RTSP | ffmpeg pipeline if enabled
+    if (enable_gimbal_capture)
+    {
+        if (gimbal_delay_sec > 0)
+        {
+            std::cout << "Waiting " << gimbal_delay_sec << " seconds before starting gimbal camera pipeline..." << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(gimbal_delay_sec));
+        }
+        std::cout << "Starting gimbal camera pipeline..." << std::endl;
+        gimbal_camera_pid = startGimbalCameraPipeline();
+        if (gimbal_camera_pid == -1)
+        {
+            std::cerr << "CRITICAL: Failed to start gimbal camera pipeline. Exiting." << std::endl;
+            stopAllChildren();
+            return 1;
+        }
+    }
+    else
+    {
+        std::cout << "Skipping gimbal camera pipeline (not enabled)." << std::endl;
+    }
+
+    // Step 3c: Start ffmpeg testsrc2 pipeline for test_stream if enabled
+    if (enable_test_stream)
+    {
+        std::cout << "Starting test stream pipeline..." << std::endl;
+        test_stream_pid = startTestStreamPipeline();
+        if (test_stream_pid == -1)
+        {
+            std::cerr << "CRITICAL: Failed to start test stream pipeline. Exiting." << std::endl;
+            stopAllChildren();
+            return 1;
+        }
+    }
+    else
+    {
+        std::cout << "Skipping test stream pipeline (not enabled)." << std::endl;
+    }
+
+    // Step 4: Start any specified scripts
+    for (const auto &script : scripts_to_execute)
+    {
+        std::cout << "Starting script: " << script << "..." << std::endl;
+        pid_t script_pid = startScript(script);
+        if (script_pid == -1)
+        {
+            std::cerr << "CRITICAL: Failed to start script: " << script << ". Exiting." << std::endl;
+            stopAllChildren();
+            return 1;
+        }
+        else if (script_pid == 0)
+        {
+            std::cout << "Script " << script << " failed to start, but continuing with other modules if enabled." << std::endl;
+        }
+        else
+        {
+            script_pids.push_back(script_pid);
+        }
+    }
+
+    // Step 5: Start tracking module (if enabled) after tracker_delay_sec seconds
+    if (enable_tracker)
+    {
+        std::this_thread::sleep_for(std::chrono::seconds(tracker_delay_sec));
+        std::cout << "Starting de_tracker..." << std::endl;
+        tracking_camera_pid = startModule(TRACKING_MODULE, TRACKING_CONFIG, "de_tracker", BASE_TRACKER_MODULE_PATH);
+        if (tracking_camera_pid == -1)
+        {
+            std::cerr << "CRITICAL: Failed to start de_tracker. Exiting." << std::endl;
+            stopAllChildren();
+            return 1;
+        }
+    }
+    else
+    {
+        std::cout << "Skipping de_tracker (not enabled)." << std::endl;
+    }
+
+    // Step 6: Start AI tracking module (if enabled) after ai_tracker_delay_sec seconds
+    if (enable_ai_tracker)
+    {
+        std::this_thread::sleep_for(std::chrono::seconds(ai_tracker_delay_sec));
+        std::cout << "Starting de_ai_tracker.so..." << std::endl;
+        ai_tracking_camera_pid = startModule(AI_TRACKER_MODULE, AI_TRACKER_CONFIG, "de_ai_tracker.so", BASE_AI_TRACKER_MODULE_PATH);
+        if (ai_tracking_camera_pid == -1)
+        {
+            std::cerr << "CRITICAL: Failed to start de_ai_tracker.so. Exiting." << std::endl;
+            stopAllChildren();
+            return 1;
+        }
+    }
+    else
+    {
+        std::cout << "Skipping de_ai_tracker.so (not enabled)." << std::endl;
+    }
+
+    // Step 7: Start Generic AI tracking module (if enabled) after generic_ai_delay_sec seconds
+    if (enable_generic_ai_tracker)
+    {
+        std::this_thread::sleep_for(std::chrono::seconds(generic_ai_delay_sec));
+        std::cout << "Starting de_yolo_generic..." << std::endl;
+        generic_ai_tracking_camera_pid = startModule(GENERIC_AI_MODULE, GENERIC_AI_CONFIG, "de_yolo_generic", BASE_GENERIC_AI_MODULE_PATH);
+        if (generic_ai_tracking_camera_pid == -1)
+        {
+            std::cerr << "CRITICAL: Failed to start de_yolo_generic. Exiting." << std::endl;
+            stopAllChildren();
+            return 1;
+        }
+    }
+    else
+    {
+        std::cout << "Skipping de_yolo_generic (not enabled)." << std::endl;
+    }
+
+    // Step 8: Start de_camera module (if enabled) after de_camera_delay_sec seconds
+    if (enable_de_camera)
+    {
+        std::this_thread::sleep_for(std::chrono::seconds(de_camera_delay_sec));
+        std::cout << "Starting de_camera..." << std::endl;
+        de_camera_pid = startModule(DE_CAMERA_MODULE, DE_CAMERA_CONFIG, "de_camera", BASE_CAMERA_MODULE_PATH);
+        if (de_camera_pid == -1)
+        {
+            std::cerr << "CRITICAL: Failed to start de_camera. Exiting." << std::endl;
+            stopAllChildren();
+            return 1;
+        }
+    }
+    else
+    {
+        std::cout << "SKIPPING de_camera..." << std::endl;
+    }
+
+    // Main monitoring loop: Wait for any child process to crash
+    while (true)
+    {
+        int status;
+        pid_t exited_pid = waitpid(-1, &status, 0);
+        if (exited_pid > 0)
+        {
+            std::string exit_reason;
+            if (WIFEXITED(status))
+            {
+                exit_reason = "exited with status " + std::to_string(WEXITSTATUS(status));
+            }
+            else if (WIFSIGNALED(status))
+            {
+                exit_reason = "terminated by signal " + std::to_string(WTERMSIG(status));
+            }
+            else
+            {
+                exit_reason = "exited for unknown reason";
+            }
+            std::cerr << "Child process (PID " << exited_pid << ") " << exit_reason << ". Crashing wrapper to force a full systemctl restart." << std::endl;
+            preemptiveKill();
+            return 1;
+        }
+    }
+
+    return 0;
+}
+

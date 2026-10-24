@@ -3,15 +3,18 @@
 # Start ArduPilot SITL + de_comm + de_mavlink simulator instance(s) on
 # droneengage.local.
 #
-#   no arg / 1  -> start instance 1 only  (SITL -I190, TCP 7660)
-#   2           -> start instances 1 AND 2 (SITL -I190/191, TCP 7660/7670)
+#   no arg / 1  -> start instance 1 only  (SITL -I200, TCP 7760)
+#   2           -> start instances 1 AND 2 (SITL -I200/201, TCP 7760/7770)
 #
 # SITL is run directly (no vehicle.py / sim_vehicle.py wrapper) and exposes
 # MAVLink over TCP using the -I instance scheme:
-#   instance 190 -> TCP 5760 + 10*190 = 7660
-#   instance 191 -> TCP 5760 + 10*191 = 7670
+#   instance 200 -> TCP 5760 + 10*200 = 7760
+#   instance 201 -> TCP 5760 + 10*201 = 7770
 # de_mavlink connects to these TCP ports as a client (fcb_connection_uri.type=tcp).
-# Instance 1 matches the production de_mavlink config (port 7660).
+# Sim ports are intentionally different from the production de_mavlink FCB
+# port (7660) so the simulator never hijacks the real unit's FC link.
+# NOTE: the -I instance arg is a uint8 in SITL (wraps mod 256); -I290 would
+# bind 6100, so sims use -I200/-I201.
 #
 # Start order per instance: SITL first (wait for TCP listen), then de_comm,
 # then de_mavlink, then wait for "Mavlink Connected".
@@ -64,7 +67,7 @@ log() { echo -e "${1}${2}${NC}"; }
 
 # --- instance table: <inst> <sysid> <tcp_port> <s2s_listen> <s2s_target> ---
 # Row 1 = instance 1, Row 2 = instance 2.
-ALL_INSTANCES=( "190 1 7660 51003 51000" "191 2 7670 52003 52000" )
+ALL_INSTANCES=( "200 1 7760 51003 51000" "201 2 7770 52003 52000" )
 INSTANCES=()
 for ((i=0; i<COUNT; i++)); do INSTANCES+=("${ALL_INSTANCES[i]}"); done
 

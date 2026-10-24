@@ -12,6 +12,7 @@ ExecStart=/home/pi/scripts/wrapper/camera_manager_wrapper -c
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=10
+Environment=DE_VIDEO_WIDTH=800 DE_VIDEO_HEIGHT=600 DE_VIDEO_FRAMERATE=15
 
 StandardOutput=journal
 StandardError=journal

@@ -1,0 +1,26 @@
+[Unit]
+Description=Drone Engage Camera with test_stream virtual camera pipeline Ver 2.0
+After=network.target multi-user.target
+Documentation=https://droneengage.com
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/
+ExecStart=/home/pi/scripts/wrapper/camera_manager_wrapper -s
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=10
+Environment=DE_VIDEO_WIDTH=800 DE_VIDEO_HEIGHT=600 DE_VIDEO_FRAMERATE=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=camera_wrapper
+
+# --- Hardening (moderate) ---
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
